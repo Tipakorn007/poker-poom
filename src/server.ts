@@ -17,6 +17,7 @@ const rooms = new RoomService({
   rateLimitWindowMs: 10_000,
   disconnectWaitMs: 60_000,
   emptyRoomTtlMs: 30 * 60_000,
+  botDelayMs: 600,
 });
 
 const contentTypes: Record<string, string> = {
@@ -111,6 +112,6 @@ const server = Bun.serve<ConnectionData>({
 
 setInterval(() => {
   sendDeliveries(rooms.runMaintenance());
-}, 1_000);
+}, 100);
 
 console.log(`Poker server listening on http://localhost:${server.port}`);

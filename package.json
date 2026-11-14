@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "build:client": "bun build ./src/client.ts --outfile ./public/app.js --target browser --minify"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

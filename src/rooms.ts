@@ -1,5 +1,7 @@
 import { createGame, applyAction, getPlayerView } from "./game";
 import type { GameState, PlayerAction, PlayerView } from "./game";
+import { evaluateHand } from "./evaluator";
+import { chooseBotAction } from "./bot";
 
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 const MAX_PLAYERS = 10;
@@ -13,6 +15,8 @@ type ConnectionPlayer = {
 
 type RoomPlayer = {
   id: string;
+  displayName: string;
+  isBot: boolean;
   token: string;
   connectionId: string | null;
   disconnectedAt: number | null;
@@ -24,6 +28,7 @@ type Room = {
   startingChips: number;
   players: RoomPlayer[];
   game: GameState | null;
+  botActionAt: number | null;
   emptySince: number | null;
 };
 
@@ -33,6 +38,7 @@ export type RoomServiceOptions = Readonly<{
   rateLimitWindowMs: number;
   disconnectWaitMs: number;
   emptyRoomTtlMs: number;
+  botDelayMs: number;
   now?: () => number;
 }>;
 
@@ -62,9 +68,21 @@ export type ServerMessage =
       ownerId: string;
       startingChips: number;
       maxPlayers: number;
-      players: readonly Readonly<{ id: string; connected: boolean }>[];
+      players: readonly Readonly<{
+        id: string;
+        displayName: string;
+        isBot: boolean;
+        connected: boolean;
+      }>[];
     }>
-  | Readonly<{ type: "state"; roomCode: string; state: PlayerView }>
+  | Readonly<{
+      type: "state";
+      roomCode: string;
+      state: PlayerView;
+      playerNames: Readonly<Record<string, string>>;
+      botPlayerIds: readonly string[];
+      handCategories?: Readonly<Record<string, string>>;
+    }>
   | Readonly<{ type: "error"; message: string }>;
 
 export type Delivery = Readonly<{
@@ -73,13 +91,28 @@ export type Delivery = Readonly<{
 }>;
 
 type IncomingMessage =
-  | Readonly<{ type: "create_room"; startingChips: number }>
-  | Readonly<{ type: "join_room"; roomCode: string }>
+  | Readonly<{ type: "create_room"; startingChips: number; displayName: string }>
+  | Readonly<{ type: "join_room"; roomCode: string; displayName: string }>
   | Readonly<{ type: "reconnect"; roomCode: string; token: string }>
   | Readonly<{ type: "start_game" }>
+  | Readonly<{ type: "add_bot" }>
   | Readonly<{ type: "action"; action: PlayerAction }>;
 
 class RoomError extends Error {}
+
+function parseDisplayName(value: unknown): string {
+  if (value === undefined) {
+    return "Player";
+  }
+  if (typeof value !== "string") {
+    throw new RoomError("displayName must be text");
+  }
+  const displayName = value.trim().replace(/\s+/g, " ");
+  if (displayName.length < 1 || displayName.length > 24) {
+    throw new RoomError("displayName must be 1 to 24 characters");
+  }
+  return displayName;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -114,13 +147,21 @@ function parseIncomingMessage(raw: unknown): IncomingMessage {
           `startingChips must be between 1 and ${MAX_STARTING_CHIPS}`,
         );
       }
-      return { type: "create_room", startingChips: Number(value.startingChips) };
+      return {
+        type: "create_room",
+        startingChips: Number(value.startingChips),
+        displayName: parseDisplayName(value.displayName),
+      };
 
     case "join_room":
       if (typeof value.roomCode !== "string") {
         throw new RoomError("roomCode is required");
       }
-      return { type: "join_room", roomCode: value.roomCode };
+      return {
+        type: "join_room",
+        roomCode: value.roomCode,
+        displayName: parseDisplayName(value.displayName),
+      };
 
     case "reconnect":
       if (typeof value.roomCode !== "string" || typeof value.token !== "string") {
@@ -130,6 +171,9 @@ function parseIncomingMessage(raw: unknown): IncomingMessage {
 
     case "start_game":
       return { type: "start_game" };
+
+    case "add_bot":
+      return { type: "add_bot" };
 
     case "action": {
       if (!isRecord(value.action) || typeof value.action.type !== "string") {
@@ -199,6 +243,7 @@ export class RoomService {
       ["maxMessagesPerWindow", options.maxMessagesPerWindow],
       ["rateLimitWindowMs", options.rateLimitWindowMs],
       ["emptyRoomTtlMs", options.emptyRoomTtlMs],
+      ["botDelayMs", options.botDelayMs],
     ] as const) {
       if (!Number.isSafeInteger(value) || value <= 0) {
         throw new RangeError(`${name} must be a positive safe integer`);
@@ -274,7 +319,7 @@ export class RoomService {
       }
 
       if (room.game) {
-        deliveries.push(...this.foldExpiredTurnPlayers(room, now));
+        deliveries.push(...this.processAutomatedTurns(room, now));
       }
     }
 
@@ -288,11 +333,11 @@ export class RoomService {
   ): Delivery[] {
     if (message.type === "create_room") {
       this.requireUnbound(connectionId);
-      return this.createRoom(connectionId, message.startingChips);
+      return this.createRoom(connectionId, message.startingChips, message.displayName);
     }
     if (message.type === "join_room") {
       this.requireUnbound(connectionId);
-      return this.joinRoom(connectionId, message.roomCode);
+      return this.joinRoom(connectionId, message.roomCode, message.displayName);
     }
     if (message.type === "reconnect") {
       this.requireUnbound(connectionId);
@@ -309,6 +354,21 @@ export class RoomService {
       throw new RoomError("This connection is no longer in the room");
     }
 
+    if (message.type === "add_bot") {
+      if (identity.playerId !== room.ownerId) {
+        throw new RoomError("Only the room owner can add bots");
+      }
+      if (room.game) {
+        throw new RoomError("Bots can only be added before the game starts");
+      }
+      if (room.players.length >= MAX_PLAYERS) {
+        throw new RoomError("The room is full");
+      }
+      const botCount = room.players.filter(({ isBot }) => isBot).length + 1;
+      room.players.push(this.newBot(`บอท ${botCount}`));
+      return this.broadcastRoom(room);
+    }
+
     if (message.type === "start_game") {
       if (identity.playerId !== room.ownerId) {
         throw new RoomError("Only the room owner can start the game");
@@ -316,8 +376,8 @@ export class RoomService {
       if (room.game) {
         throw new RoomError("The game has already started");
       }
-      if (room.players.filter(({ connectionId: id }) => id !== null).length < 2) {
-        throw new RoomError("At least two connected players are required");
+      if (room.players.filter(({ isBot, connectionId: id }) => isBot || id !== null).length < 2) {
+        throw new RoomError("At least two connected players or bots are required");
       }
 
       const baseGame = createGame(room.players.map(({ id }) => id));
@@ -328,9 +388,10 @@ export class RoomService {
           chips: room.startingChips,
         })),
       };
+      this.scheduleAutomaticTurn(room, now);
       return [
         ...this.broadcastGame(room),
-        ...this.foldExpiredTurnPlayers(room, now),
+        ...this.processAutomatedTurns(room, now),
       ];
     }
 
@@ -347,15 +408,17 @@ export class RoomService {
       throw error;
     }
 
+    this.scheduleAutomaticTurn(room, now);
     return [
       ...this.broadcastGame(room),
-      ...this.foldExpiredTurnPlayers(room, now),
+      ...this.processAutomatedTurns(room, now),
     ];
   }
 
   private createRoom(
     connectionId: string,
     startingChips: number,
+    displayName: string,
   ): Delivery[] {
     if (this.rooms.size >= this.options.maxRooms) {
       throw new RoomError("The server has reached its room limit");
@@ -373,13 +436,14 @@ export class RoomService {
       throw new RoomError("Could not allocate a room code; try again");
     }
 
-    const player = this.newPlayer(connectionId);
+    const player = this.newPlayer(connectionId, displayName);
     const room: Room = {
       code,
       ownerId: player.id,
       startingChips,
       players: [player],
       game: null,
+      botActionAt: null,
       emptySince: null,
     };
     this.rooms.set(code, room);
@@ -400,7 +464,11 @@ export class RoomService {
     ];
   }
 
-  private joinRoom(connectionId: string, requestedCode: string): Delivery[] {
+  private joinRoom(
+    connectionId: string,
+    requestedCode: string,
+    displayName: string,
+  ): Delivery[] {
     const room = this.requireRoom(requestedCode);
     if (room.game) {
       throw new RoomError("This game has already started");
@@ -409,7 +477,7 @@ export class RoomService {
       throw new RoomError("This room is full");
     }
 
-    const player = this.newPlayer(connectionId);
+    const player = this.newPlayer(connectionId, displayName);
     room.players.push(player);
     room.emptySince = null;
     this.connections.set(connectionId, { roomCode: room.code, playerId: player.id });
@@ -462,14 +530,27 @@ export class RoomService {
     ];
   }
 
-  private newPlayer(connectionId: string): RoomPlayer {
+  private newPlayer(connectionId: string, displayName: string): RoomPlayer {
     const player: RoomPlayer = {
       id: randomSecret(),
+      displayName,
+      isBot: false,
       token: randomSecret(),
       connectionId,
       disconnectedAt: null,
     };
     return player;
+  }
+
+  private newBot(displayName: string): RoomPlayer {
+    return {
+      id: randomSecret(),
+      displayName,
+      isBot: true,
+      token: randomSecret(),
+      connectionId: null,
+      disconnectedAt: null,
+    };
   }
 
   private requireRoom(requestedCode: string): Room {
@@ -498,9 +579,11 @@ export class RoomService {
       ownerId: room.ownerId,
       startingChips: room.startingChips,
       maxPlayers: MAX_PLAYERS,
-      players: room.players.map(({ id, connectionId }) => ({
+      players: room.players.map(({ id, displayName, isBot, connectionId }) => ({
         id,
-        connected: connectionId !== null,
+        displayName,
+        isBot,
+        connected: isBot || connectionId !== null,
       })),
     };
 
@@ -517,6 +600,22 @@ export class RoomService {
     }
 
     const game = room.game;
+    const playerNames = Object.fromEntries(
+      room.players.map(({ id, displayName }) => [id, displayName]),
+    );
+    const botPlayerIds = room.players
+      .filter(({ isBot }) => isBot)
+      .map(({ id }) => id);
+    const handCategories = game.showdownRevealed
+      ? Object.fromEntries(
+          game.players
+            .filter((player) => !player.folded)
+            .map((player) => [
+              player.id,
+              evaluateHand([...player.holeCards, ...game.board]).category,
+            ]),
+        )
+      : undefined;
     return room.players.flatMap((player) =>
       player.connectionId === null
         ? []
@@ -526,26 +625,56 @@ export class RoomService {
               type: "state" as const,
               roomCode: room.code,
               state: getPlayerView(game, player.id),
+              playerNames,
+              botPlayerIds,
+              ...(handCategories ? { handCategories } : {}),
             },
           }],
     );
   }
 
-  private foldExpiredTurnPlayers(room: Room, now: number): Delivery[] {
+  private scheduleAutomaticTurn(room: Room, now: number): void {
+    const currentPlayer = room.players.find(({ id }) => id === room.game?.turn);
+    room.botActionAt =
+      currentPlayer?.isBot && room.game
+        ? now + this.options.botDelayMs
+        : null;
+  }
+
+  private processAutomatedTurns(room: Room, now: number): Delivery[] {
     const deliveries: Delivery[] = [];
 
     while (room.game && room.game.turn !== null) {
       const currentPlayer = room.players.find(({ id }) => id === room.game?.turn);
+      if (!currentPlayer) {
+        break;
+      }
+
+      if (currentPlayer.isBot) {
+        if (room.botActionAt === null || now < room.botActionAt) {
+          break;
+        }
+        room.game = applyAction(
+          room.game,
+          currentPlayer.id,
+          chooseBotAction(room.game, currentPlayer.id),
+        );
+        this.scheduleAutomaticTurn(room, now);
+        deliveries.push(...this.broadcastGame(room));
+        continue;
+      }
+
       if (
-        !currentPlayer ||
         currentPlayer.connectionId !== null ||
         currentPlayer.disconnectedAt === null ||
         now - currentPlayer.disconnectedAt < this.options.disconnectWaitMs
       ) {
+        room.botActionAt = null;
         break;
       }
 
       room.game = applyAction(room.game, currentPlayer.id, { type: "fold" });
+      this.scheduleAutomaticTurn(room, now);
       deliveries.push(...this.broadcastGame(room));
     }
 

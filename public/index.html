@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#092b20">
+    <meta name="description" content="Texas Hold'em เล่นกับเพื่อนแบบออนไลน์">
+    <title>Poker Poom — Texas Hold'em</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Poker Poom หน้าแรก">
+        <span class="brand-mark" aria-hidden="true">♠</span>
+        <span>POKER <strong>POOM</strong></span>
+      </a>
+      <div class="topbar-actions">
+        <p id="connection-status" class="connection-status" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="connection-label">กำลังเชื่อมต่อเซิร์ฟเวอร์</span>
+        </p>
+        <button id="sound-toggle" class="icon-button" type="button" aria-pressed="true" aria-label="ปิดเสียง">เสียง: เปิด</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="home-screen" class="home-screen">
+        <div class="hero-copy">
+          <p class="eyebrow">โต๊ะส่วนตัว เล่นกับเพื่อน</p>
+          <h1>ไพ่พร้อม<br><span>เพื่อนพร้อมไหม?</span></h1>
+          <p class="hero-note">Texas Hold’em วงของคุณ เริ่มเล่นได้จากทุกหน้าจอ</p>
+          <div class="feature-pills" aria-label="จุดเด่น">
+            <span>♣ ไม่ต้องสมัคร</span>
+            <span>♦ เล่นได้ 2–10 คน</span>
+          </div>
+        </div>
+
+        <form id="room-form" class="panel room-form">
+          <label class="field-label" for="player-name">ชื่อที่ใช้บนโต๊ะ</label>
+          <input id="player-name" name="displayName" maxlength="24" autocomplete="nickname" placeholder="เช่น ปูม" required>
+
+          <div class="form-divider"><span>สร้างโต๊ะใหม่</span></div>
+          <label class="field-label" for="starting-chips">ชิปเริ่มต้นต่อคน</label>
+          <div class="input-suffix">
+            <input id="starting-chips" name="startingChips" type="number" min="1" max="900719925474099" step="1" value="1000" inputmode="numeric" required>
+            <span>ชิป</span>
+          </div>
+          <button id="create-room" class="button button-primary button-wide" type="button">♠ สร้างห้อง</button>
+
+          <div class="form-divider"><span>หรือเข้าร่วมห้อง</span></div>
+          <label class="field-label" for="room-code">รหัสห้อง 4 ตัว</label>
+          <div class="join-row">
+            <input id="room-code" name="roomCode" maxlength="4" autocapitalize="characters" autocomplete="off" placeholder="ABCD" aria-label="รหัสห้อง 4 ตัว">
+            <button id="join-room" class="button button-secondary" type="button">เข้าห้อง</button>
+          </div>
+          <p id="home-error" class="inline-error" role="alert" hidden></p>
+        </form>
+      </section>
+
+      <section id="waiting-screen" class="waiting-screen panel" hidden>
+        <div class="waiting-heading">
+          <div>
+            <p class="eyebrow">ห้องรอเล่น</p>
+            <h1>รอเพื่อนเข้าร่วม</h1>
+          </div>
+          <div class="room-code-block">
+            <span>รหัสห้อง</span>
+            <strong id="waiting-room-code"></strong>
+            <button id="copy-room-code" class="text-button" type="button">คัดลอกรหัส</button>
+          </div>
+        </div>
+        <p class="share-hint">ส่งรหัสนี้ให้เพื่อนเพื่อชวนมาที่โต๊ะ</p>
+        <h2 class="section-title">ผู้เล่น <span id="player-count">0/10</span></h2>
+        <ul id="waiting-player-list" class="waiting-player-list"></ul>
+        <div class="waiting-footer">
+          <p id="start-hint" class="muted-copy">ต้องมีผู้เล่นอย่างน้อย 2 คนจึงเริ่มได้</p>
+          <div class="waiting-actions">
+            <button id="add-bot" class="button button-secondary" type="button" hidden>🤖 เพิ่มบอท</button>
+            <button id="start-game" class="button button-primary" type="button" hidden>เริ่มเกม</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="game-screen" class="game-screen" hidden>
+        <div class="game-heading">
+          <div>
+            <p id="game-stage" class="eyebrow">ก่อนเปิดไพ่กลาง</p>
+            <h1>โต๊ะ <span id="game-room-code"></span></h1>
+          </div>
+          <p id="turn-indicator" class="turn-indicator">⌛ กำลังโหลดสถานะ</p>
+        </div>
+
+        <div class="poker-table" aria-label="โต๊ะโป๊กเกอร์">
+          <div id="seat-ring" class="seat-ring" aria-label="ผู้เล่น"></div>
+          <div class="table-center">
+            <p class="pot-label">กองกลาง</p>
+            <p class="pot-value"><span id="pot-value">0</span><small> ชิป</small></p>
+            <div id="community-cards" class="card-row community-cards" aria-label="ไพ่กลาง"></div>
+            <p id="board-hint" class="board-hint">รอเปิดไพ่กลาง</p>
+          </div>
+        </div>
+
+        <section class="player-hand" aria-label="ไพ่ในมือของคุณ">
+          <div class="hand-heading">
+            <h2>ไพ่ของคุณ</h2>
+            <span id="my-chip-count" class="chip-pill">0 ชิป</span>
+          </div>
+          <div id="my-cards" class="card-row my-cards"></div>
+        </section>
+
+        <section id="action-panel" class="action-panel" aria-label="คำสั่งเล่น">
+          <p id="action-hint" class="action-hint">รอข้อมูลจากโต๊ะ</p>
+          <div class="action-buttons">
+            <button id="fold-action" class="button button-danger" type="button" disabled>หมอบ</button>
+            <button id="check-action" class="button button-secondary" type="button" disabled>เช็ค</button>
+            <button id="call-action" class="button button-secondary" type="button" disabled>คอล</button>
+          </div>
+          <div class="raise-control">
+            <label for="raise-amount">เรสถึง <output id="raise-output" for="raise-amount">20</output> ชิป</label>
+            <div class="raise-inputs">
+              <input id="raise-amount" type="range" min="20" max="20" step="1" value="20" aria-label="จำนวนเรสถึง">
+              <input id="raise-number" type="number" min="20" max="20" step="1" value="20" inputmode="numeric" aria-label="จำนวนเรสถึงเป็นชิป">
+              <button id="raise-action" class="button button-primary" type="button" disabled>เรส</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="showdown-panel" class="showdown-panel" aria-live="polite" hidden>
+          <p class="eyebrow">จบมือ</p>
+          <h2 id="winner-message"></h2>
+          <p id="hand-result"></p>
+        </section>
+      </section>
+      <p id="server-error" class="server-error" role="alert" hidden></p>
+    </main>
+    <footer class="footer-note">เล่นเพื่อความสนุก • ไม่มีเงินจริง</footer>
+  </body>
+</html>

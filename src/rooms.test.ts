@@ -8,6 +8,7 @@ const defaultOptions = {
   rateLimitWindowMs: 10_000,
   disconnectWaitMs: 60_000,
   emptyRoomTtlMs: 30 * 60_000,
+  botDelayMs: 600,
 };
 
 function createService(
@@ -67,8 +68,18 @@ function startGame(service: RoomService, connectionId: string): void {
 describe("room creation and joining", () => {
   test("creates a four-character room and lets players join", () => {
     const service = createService();
-    const created = createRoom(service, "socket-A", 750);
-    const joined = joinRoom(service, "socket-B", created.roomCode);
+    const createdResponse = send(service, "socket-A", {
+      type: "create_room",
+      startingChips: 750,
+      displayName: "  Alice   <b> ",
+    });
+    const created = getMessage(createdResponse, "socket-A", "room_created");
+    const joinedResponse = send(service, "socket-B", {
+      type: "join_room",
+      roomCode: created.roomCode,
+      displayName: "Bob",
+    });
+    const joined = getMessage(joinedResponse, "socket-B", "room_joined");
     const secondRoom = createRoom(service, "socket-C");
 
     expect(created.roomCode).toMatch(/^[A-HJ-NP-Z]{4}$/);
@@ -76,6 +87,11 @@ describe("room creation and joining", () => {
     expect(created.startingChips).toBe(750);
     expect(joined.roomCode).toBe(created.roomCode);
     expect(joined.playerId).not.toBe(created.playerId);
+    const status = getMessage(joinedResponse, "socket-A", "room_status");
+    expect(status.players.map(({ displayName }) => displayName)).toEqual([
+      "Alice <b>",
+      "Bob",
+    ]);
     expect(
       getMessage(
         send(service, "socket-A", { type: "start_game" }),
@@ -83,6 +99,30 @@ describe("room creation and joining", () => {
         "state",
       ).state.players.every(({ chips }) => chips === 750),
     ).toBe(true);
+  });
+
+  test("includes hand categories only in revealed showdown state", () => {
+    const service = createService();
+    const created = createRoom(service, "socket-A");
+    const joined = joinRoom(service, "socket-B", created.roomCode);
+    startGame(service, "socket-A");
+
+    let activePlayer = joined.playerId;
+    let response: Delivery[] = [];
+    for (let action = 0; action < 8; action++) {
+      response = send(service, activePlayer === joined.playerId ? "socket-B" : "socket-A", {
+        type: "action",
+        action: { type: "check" },
+      });
+      activePlayer = activePlayer === joined.playerId ? created.playerId : joined.playerId;
+    }
+
+    const showdown = getMessage(response, "socket-A", "state");
+    expect(showdown.state.stage).toBe("showdown");
+    expect(showdown.handCategories?.[created.playerId]).toBeDefined();
+    expect(showdown.handCategories?.[joined.playerId]).toBeDefined();
+    expect(showdown.playerNames[created.playerId]).toBe("Player");
+    expect(showdown.state.players.find(({ id }) => id === joined.playerId)?.holeCards).toHaveLength(2);
   });
 
   test("rejects a wrong room code and a room with more than ten players", () => {
@@ -114,6 +154,49 @@ describe("room creation and joining", () => {
       startingChips: 1_000,
     });
     expect(getMessage(response, "socket-B", "error").message).toContain("room limit");
+  });
+
+  test("lets the owner start alone with a bot and waits before its turn", () => {
+    let now = 1_000;
+    const service = createService(() => now);
+    const created = createRoom(service, "socket-A");
+    const added = send(service, "socket-A", { type: "add_bot" });
+    const roomStatus = getMessage(added, "socket-A", "room_status");
+    const bot = roomStatus.players.find(({ isBot }) => isBot);
+
+    expect(bot?.displayName).toBe("บอท 1");
+    expect(bot?.connected).toBe(true);
+
+    const started = send(service, "socket-A", { type: "start_game" });
+    const initialState = getMessage(started, "socket-A", "state").state;
+    expect(initialState.players).toHaveLength(2);
+    expect(bot).toBeDefined();
+    expect(initialState.turn).toBe(bot!.id);
+    expect(service.runMaintenance(now + 599)).toHaveLength(0);
+
+    now += 600;
+    const botAction = service.runMaintenance(now);
+    const updatedState = getMessage(botAction, "socket-A", "state").state;
+    expect(updatedState.turn).toBe(created.playerId);
+  });
+
+  test("restricts adding bots to the owner and stops at ten seats", () => {
+    const service = createService();
+    const created = createRoom(service, "socket-A");
+    joinRoom(service, "socket-B", created.roomCode);
+
+    const denied = send(service, "socket-B", { type: "add_bot" });
+    expect(getMessage(denied, "socket-B", "error").message).toContain("Only the room owner");
+
+    let statusResponse: Delivery[] = [];
+    for (let index = 0; index < 8; index++) {
+      statusResponse = send(service, "socket-A", { type: "add_bot" });
+    }
+    const status = getMessage(statusResponse, "socket-A", "room_status");
+    expect(status.players).toHaveLength(10);
+
+    const full = send(service, "socket-A", { type: "add_bot" });
+    expect(getMessage(full, "socket-A", "error").message).toBe("The room is full");
   });
 });
 
